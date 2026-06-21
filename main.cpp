@@ -11,6 +11,25 @@
 //    Asia   :  00:00 – 08:00
 //    London :  08:00 – 16:30
 //    NY     :  13:30 – 20:00
+//
+//  ★ FIX (this version) — REAL-TIME-ACCURATE PLAYBACK
+//  -----------------------------------------------------
+//  OLD BEHAVIOUR:
+//    Every render frame slept a FIXED REFRESH_MS (50ms) regardless
+//    of how much feed-time had actually elapsed. Since message
+//    processing itself is near-instant, every frame ended up paced
+//    at roughly the same constant wall-clock interval — bursts of
+//    real market activity got artificially slowed down, and quiet
+//    periods got artificially sped up. Replay speed had nothing to
+//    do with the data's actual timestamps.
+//
+//  NEW BEHAVIOUR:
+//    The sleep between frames is now proportional to the *feed-time*
+//    delta between renders (scaled by PLAYBACK_SPEED), so a 20ms
+//    burst plays back in ~20ms and a 5s lull plays back in ~5s
+//    (at 1.0x speed). A MAX_GAP_NS cap prevents genuinely long gaps
+//    (e.g. session boundaries) from stalling playback for real
+//    minutes/hours.
 // ============================================================
 
 #include "L3_orderflow.cpp"
@@ -24,7 +43,7 @@
 // ─────────────────────────────────────────────────────────────
 
 //                        ↓ change this
-const std::string SKIP_TO_TIME = "13:30:00";   // NY session open
+const std::string SKIP_TO_TIME = "13:28:00";   // NY session open
 
 // Common session start times:
 // const std::string SKIP_TO_TIME = "00:00:00"; // Asia open (or play from start)
@@ -33,6 +52,20 @@ const std::string SKIP_TO_TIME = "13:30:00";   // NY session open
 // const std::string SKIP_TO_TIME = "14:30:00"; // NY + 1 hour (after open volatility)
 // const std::string SKIP_TO_TIME = "18:00:00"; // NY afternoon
 // const std::string SKIP_TO_TIME = "20:00:00"; // NY close
+
+// ─────────────────────────────────────────────────────────────
+//  PLAYBACK PACING SETTINGS
+// ─────────────────────────────────────────────────────────────
+
+// 1.0 = real-time (matches actual elapsed market time)
+// 2.0 = 2x speed, 0.5 = half speed, etc.
+static constexpr double PLAYBACK_SPEED = 1.0;
+
+// Hard cap on how long any single real-time wait can be, in nanoseconds.
+// Prevents long genuine market gaps (lunch lulls, session boundaries)
+// from freezing playback for real minutes. Lower this for snappier
+// replay through quiet periods, raise it for stricter time-accuracy.
+static constexpr int64_t MAX_GAP_NS = 1'000'000'000LL;   // 1 second
 
 int main(int argc, char* argv[])
 {
@@ -72,6 +105,9 @@ int main(int argc, char* argv[])
     else
         std::cout << "Mode   : Fast-forward to " << skip_to << " UTC\n";
 
+    std::cout << "Speed  : " << PLAYBACK_SPEED << "x real-time"
+               << " (max gap cap " << (MAX_GAP_NS / 1'000'000LL) << "ms)\n";
+
     std::cout << "\nSessions (UTC):\n";
     std::cout << "  Asia    00:00 - 08:00   " << (skip_to == "00:00:00" ? "<--" : "") << "\n";
     std::cout << "  London  08:00 - 16:30   " << (skip_to == "08:00:00" ? "<--" : "") << "\n";
@@ -81,8 +117,8 @@ int main(int argc, char* argv[])
 
     // ── Feed loop ─────────────────────────────────────────────
     FeedMessage msg;
-    int64_t prev_ts       = 0;
-    int64_t skip_count    = 0;
+    int64_t prev_ts        = 0;
+    int64_t skip_count     = 0;
     bool    reached_target = (skip_to.empty() || skip_to == "00:00:00");
 
     while (feed.next(msg))
@@ -93,11 +129,7 @@ int main(int argc, char* argv[])
         if (!reached_target)
         {
             // Process silently — book must be accurate when we start rendering
-            if (msg.event_type == EventType::RESET)
-                book.process(msg);
-            else
-                book.process(msg);
-
+            book.process(msg);
             skip_count++;
 
             // Compare time strings directly — "HH:MM:SS" is lexicographically safe
@@ -106,22 +138,19 @@ int main(int argc, char* argv[])
                 reached_target = true;
 
                 std::cout << "\033[2J\033[H";
-std::cout << "═══════════════════════════════════════\n";
-std::cout << "  JUMPED TO  : " << msg.time_str << " UTC\n";
-std::cout << "  MSGS SKIPPED: " << skip_count << "\n";
-std::cout << "  BID LEVELS  : " << book.bids.size() << "\n";
-std::cout << "  ASK LEVELS  : " << book.asks.size() << "\n";
-std::cout << "  BEST BID    : " << book.best_bid() << "\n";
-std::cout << "  BEST ASK    : " << book.best_ask() << "\n";
-std::cout << "  SPREAD      : " << book.spread() << "\n";
-std::cout << "  MID         : " << book.mid_price() << "\n";
-std::cout << "  ORDERS LIVE : " << book.order_map.size() << "\n";
-std::cout << "═══════════════════════════════════════\n";
-std::cout << "Press ENTER to start display...\n";
-std::cin.get();   // pause so you can read it
-
-viz.initialized = false;
-prev_ts = msg.timestamp_ns;
+                std::cout << "═══════════════════════════════════════\n";
+                std::cout << "  JUMPED TO  : " << msg.time_str << " UTC\n";
+                std::cout << "  MSGS SKIPPED: " << skip_count << "\n";
+                std::cout << "  BID LEVELS  : " << book.bids.size() << "\n";
+                std::cout << "  ASK LEVELS  : " << book.asks.size() << "\n";
+                std::cout << "  BEST BID    : " << book.best_bid() << "\n";
+                std::cout << "  BEST ASK    : " << book.best_ask() << "\n";
+                std::cout << "  SPREAD      : " << book.spread() << "\n";
+                std::cout << "  MID         : " << book.mid_price() << "\n";
+                std::cout << "  ORDERS LIVE : " << book.order_map.size() << "\n";
+                std::cout << "═══════════════════════════════════════\n";
+                std::cout << "Press ENTER to start display...\n";
+                std::cin.get();   // pause so you can read it
 
                 // Clear screen and show what we skipped
                 std::cout << "\033[2J\033[H";   // clear terminal
@@ -134,8 +163,11 @@ prev_ts = msg.timestamp_ns;
                 std::cout << "\n  Starting display...\n";
                 std::this_thread::sleep_for(std::chrono::seconds(1));
 
-                viz.initialized = false;   // force fresh screen draw
+                viz.initialized = false;    // force fresh screen draw
                 prev_ts = msg.timestamp_ns; // reset render timer
+                // NOTE: this also resets the pacing reference point —
+                // playback resumes counting real-time gaps from here,
+                // so the jump itself never causes a giant catch-up sleep.
             }
             else
             {
@@ -186,14 +218,23 @@ prev_ts = msg.timestamp_ns;
             book.process(msg);
         }
 
-        // ── Render every ~100ms of feed time ─────────────────
+        // ── Render every ~100ms of FEED time, paced at REAL time ──
         if (msg.timestamp_ns - prev_ts >= 100'000'000LL
             && !book.bids.empty()
             && !book.asks.empty())
         {
+            // ★ FIX: sleep proportional to the feed-time gap, not a
+            // fixed constant. This is what makes playback track the
+            // market's actual pace instead of a flat frame rate.
+            int64_t feed_delta_ns = msg.timestamp_ns - prev_ts;
+            int64_t sleep_ns      = (int64_t)((double)feed_delta_ns / PLAYBACK_SPEED);
+            sleep_ns              = std::min(sleep_ns, MAX_GAP_NS);
+
+            if (sleep_ns > 0)
+                std::this_thread::sleep_for(std::chrono::nanoseconds(sleep_ns));
+
             viz.render(book);
             detector.print_alerts(3);
-            std::this_thread::sleep_for(std::chrono::milliseconds(REFRESH_MS));
             prev_ts = msg.timestamp_ns;
         }
     }
