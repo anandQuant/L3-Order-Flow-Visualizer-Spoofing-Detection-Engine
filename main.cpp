@@ -30,6 +30,19 @@
 //    (at 1.0x speed). A MAX_GAP_NS cap prevents genuinely long gaps
 //    (e.g. session boundaries) from stalling playback for real
 //    minutes/hours.
+//
+//  ★ FIX 2 — SKIP THE WARM-UP, DON'T WATCH IT
+//  -------------------------------------------
+//  Fast-forward used to stop purely on TIME. If the book was still
+//  thin right at the target time (few resting orders per side, huge
+//  spread left over from a recent Reset), playback would start anyway
+//  and you'd sit through the real warm-up period as it (correctly,
+//  per FIX 1) ticks along at real-time speed — which can genuinely
+//  take 15-20+ minutes of feed-time. Now fast-forward waits for BOTH
+//  the target time AND a sane book (MIN_DEPTH_LEVELS per side, spread
+//  under MAX_WARMUP_SPREAD) before it stops — and that waiting happens
+//  at full CPU speed with no sleeping, so it costs milliseconds of
+//  real time no matter how long the underlying warm-up actually took.
 // ============================================================
 
 #include "L3_orderflow.cpp"
@@ -43,7 +56,7 @@
 // ─────────────────────────────────────────────────────────────
 
 //                        ↓ change this
-const std::string SKIP_TO_TIME = "13:28:00";   // NY session open
+const std::string SKIP_TO_TIME = "14:00:00";   // NY session open
 
 // Common session start times:
 // const std::string SKIP_TO_TIME = "00:00:00"; // Asia open (or play from start)
@@ -56,6 +69,25 @@ const std::string SKIP_TO_TIME = "13:28:00";   // NY session open
 // ─────────────────────────────────────────────────────────────
 //  PLAYBACK PACING SETTINGS
 // ─────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────
+//  BOOK WARM-UP / READINESS SETTINGS
+//  ★ FIX — the old fast-forward only checked TIME. If the book was
+//  still thin at the target time (few orders per side, huge spread
+//  from a recent Reset/session-open), you'd start rendering anyway
+//  and have to sit through the real "aggregating orders" warm-up —
+//  which we now know can genuinely take 15-20+ minutes of feed-time.
+//
+//  Now, fast-forward waits for BOTH conditions before it starts
+//  rendering: target time reached AND the book looks "real" (enough
+//  resting levels per side, spread back down to a sane value). The
+//  warm-up itself still gets processed — just silently, at full CPU
+//  speed (no sleeping), so it costs milliseconds of real time instead
+//  of minutes, no matter how long it took in the actual feed.
+// ─────────────────────────────────────────────────────────────
+
+static constexpr int    MIN_DEPTH_LEVELS   = 5;     // need at least this many price levels per side
+static constexpr double MAX_WARMUP_SPREAD  = 5.0;   // don't start until spread is back under this (NQ ticks)
 
 // 1.0 = real-time (matches actual elapsed market time)
 // 2.0 = 2x speed, 0.5 = half speed, etc.
@@ -119,13 +151,26 @@ int main(int argc, char* argv[])
     FeedMessage msg;
     int64_t prev_ts        = 0;
     int64_t skip_count     = 0;
-    bool    reached_target = (skip_to.empty() || skip_to == "00:00:00");
+    bool    reached_time   = (skip_to.empty() || skip_to == "00:00:00");
+    bool    reached_target = false;
+
+    // ★ FIX: book is only "ready" once it has real depth on both sides
+    // AND the spread has come back down to a sane value. This is what
+    // lets us skip the thin/warm-up period entirely instead of watching
+    // it crawl in (now correctly) real-time.
+    auto book_ready = [&]() {
+        return (int)book.bids.size() >= MIN_DEPTH_LEVELS
+            && (int)book.asks.size() >= MIN_DEPTH_LEVELS
+            && book.spread() > 0.0
+            && book.spread() <= MAX_WARMUP_SPREAD;
+    };
 
     while (feed.next(msg))
     {
         // ── FAST-FORWARD PHASE ────────────────────────────────
         // Always process every message so the book state is correct.
-        // Just skip rendering until we reach the target time.
+        // Just skip rendering until target time is reached AND the
+        // book is no longer thin (no sleeping here — full speed).
         if (!reached_target)
         {
             // Process silently — book must be accurate when we start rendering
@@ -133,7 +178,10 @@ int main(int argc, char* argv[])
             skip_count++;
 
             // Compare time strings directly — "HH:MM:SS" is lexicographically safe
-            if (!msg.time_str.empty() && msg.time_str >= skip_to)
+            if (!reached_time && !msg.time_str.empty() && msg.time_str >= skip_to)
+                reached_time = true;
+
+            if (reached_time && book_ready())
             {
                 reached_target = true;
 
@@ -148,6 +196,7 @@ int main(int argc, char* argv[])
                 std::cout << "  SPREAD      : " << book.spread() << "\n";
                 std::cout << "  MID         : " << book.mid_price() << "\n";
                 std::cout << "  ORDERS LIVE : " << book.order_map.size() << "\n";
+                std::cout << "  (book skipped straight past warm-up — spread/depth now sane)\n";
                 std::cout << "═══════════════════════════════════════\n";
                 std::cout << "Press ENTER to start display...\n";
                 std::cin.get();   // pause so you can read it
@@ -177,7 +226,11 @@ int main(int argc, char* argv[])
                     std::cout << "\r  Fast-forwarding...  "
                               << skip_count << " msgs  "
                               << "time=" << msg.time_str
-                              << "  target=" << skip_to
+                              << (reached_time ? "  [time OK, waiting on book depth/spread]"
+                                                : ("  target=" + skip_to))
+                              << "  bid_lvls=" << book.bids.size()
+                              << "  ask_lvls=" << book.asks.size()
+                              << "  spread=" << book.spread()
                               << "     " << std::flush;
                 }
                 continue;   // skip the render section below
@@ -233,14 +286,14 @@ int main(int argc, char* argv[])
             if (sleep_ns > 0)
                 std::this_thread::sleep_for(std::chrono::nanoseconds(sleep_ns));
 
-            viz.render(book);
+            viz.render(book, msg.time_str);   // ★ pass current feed time for display
             detector.print_alerts(3);
             prev_ts = msg.timestamp_ns;
         }
     }
 
     // ── End of feed ───────────────────────────────────────────
-    viz.render(book);
+    viz.render(book, msg.time_str);
     detector.print_alerts(10);
     std::cout << "\n[END OF FEED]\n";
     std::cout << "Total messages skipped : " << skip_count << "\n";
