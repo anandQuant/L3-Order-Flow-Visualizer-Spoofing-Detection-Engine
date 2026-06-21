@@ -10,6 +10,12 @@
 //  Timestamp format: 2026-04-05T13:29:43.776471934+0000
 //  Actions: Add | Cancel | Modify | Trade | Fill | Reset
 //  Sides  : Buy | Sell
+//
+//  ★ FIX (this version) — TIME DISPLAY
+//  -----------------------------------
+//  render() now accepts the current message's time_str and shows it
+//  in the title row, e.g. " DOM  14:23:07 UTC  Last: ... ".
+//  Caller (main.cpp) passes msg.time_str on every render() call.
 // ============================================================
 
 // ─────────────────────────────────────────────────────────────
@@ -37,7 +43,7 @@
 // ─────────────────────────────────────────────────────────────
 
 static constexpr int BOOK_DEPTH = 10;        // price levels shown per side
-static constexpr int REFRESH_MS = 80;        // redraw interval (ms)
+static constexpr int REFRESH_MS = 50;        // (legacy — pacing now lives in main.cpp)
 static constexpr int TAPE_ROWS  = BOOK_DEPTH * 2 + 1;  // 21 — same height as DOM
 
 // ── Terminal panels ──────────────────────────────────────────
@@ -444,8 +450,20 @@ private:
             tss >> std::get_time(&tm, "%Y-%m-%d %H:%M:%S");
         }
         tm.tm_isdst = -1;
-        msg.timestamp_ns = (int64_t)std::mktime(&tm) * 1'000'000'000LL
+
+        // ★ NOTE: timestamp is explicitly UTC ("+0000" in the source format).
+        // Using timegm() here (not mktime()) avoids misreading it as local
+        // time, which would otherwise shift all timestamps by the host
+        // machine's UTC offset and could jump an hour across a local DST
+        // boundary. time_str above (used for display/SKIP_TO_TIME) is
+        // unaffected either way since it's a plain substring of the source.
+#ifdef _WIN32
+        msg.timestamp_ns = (int64_t)_mkgmtime(&tm) * 1'000'000'000LL
                            + std::stoll(frac_part);
+#else
+        msg.timestamp_ns = (int64_t)timegm(&tm) * 1'000'000'000LL
+                           + std::stoll(frac_part);
+#endif
 
         // ── Action ───────────────────────────────────────────
         const std::string& a = f[1];
@@ -501,19 +519,6 @@ namespace clr
 //
 //  Left  panel (cols 1–32)  : Time & Sales tape
 //  Right panel (cols 34–97) : Depth of Market
-//
-//  BUG FIXES applied here:
-//   1. draw_asks — index formula corrected so best ask appears
-//      at the bottom of the ask section (closest to spread).
-//      OLD: idx = count-1-(BOOK_DEPTH-1-slot)  ← reversed order
-//      NEW: idx = BOOK_DEPTH-1-slot             ← correct
-//
-//   2. draw_bids — bar width now capped at MAX_BID_BAR (12)
-//      so the histogram can never overwrite the SIZE column.
-//      OLD: bar scaled to 12 starting at D_B_BAR (col +4),
-//           reaching col +15, overlapping D_B_SZ at col +10
-//      NEW: column layout widened so D_B_SZ is at col +17,
-//           giving a clean 1-char gap after the bar.
 // ─────────────────────────────────────────────────────────────
 class Visualizer
 {
@@ -526,11 +531,14 @@ public:
         std::cout << "\033[?25h\033[" << R_CURSOR << ";1H\n" << std::flush;
     }
 
-    void render(const OrderBook& book)
+    // ★ FIX: render() now takes the current feed time (HH:MM:SS) and
+    // shows it in the title row. Defaults to "" so old call sites still
+    // compile, but main.cpp should pass msg.time_str on every call.
+    void render(const OrderBook& book, const std::string& time_str = "")
     {
         if (!initialized) draw_chrome();
 
-        draw_title(book);
+        draw_title(book, time_str);
         draw_stats(book);
         draw_asks(book);
         draw_spread(book);
@@ -632,7 +640,7 @@ private:
     }
 
     // ── Title row ────────────────────────────────────────────
-    void draw_title(const OrderBook& book)
+    void draw_title(const OrderBook& book, const std::string& time_str)
     {
         move(R_TITLE, 1);
         std::cout << std::string(TAPE_W + 1 + DOM_W, ' ');
@@ -642,6 +650,11 @@ private:
         double prev = book.prev_last_price;
 
         std::cout << clr::B << clr::C << " DOM" << clr::X;
+
+        // ★ FIX: show current feed time
+        if (!time_str.empty())
+            std::cout << "  " << clr::B << clr::W << time_str << " UTC" << clr::X;
+
         std::cout << "  Last: " << clr::B;
 
         if      (last > prev) std::cout << clr::G << fp(last) << " [+]" << clr::X;
@@ -669,24 +682,6 @@ private:
     }
 
     // ── Asks ─────────────────────────────────────────────────
-    //
-    //  asks map: sorted LOW → HIGH
-    //    levels[0]         = best ask  (lowest price, closest to spread)
-    //    levels[count-1]   = worst ask (highest price, farthest from spread)
-    //
-    //  Display (top of screen = worst ask, bottom = best ask):
-    //    slot 0        → row R_ASK_0      (top    = worst / highest)
-    //    slot DEPTH-1  → row R_ASK_0+9   (bottom = best  / lowest)
-    //
-    //  ★ FIXED INDEX FORMULA:
-    //    idx = BOOK_DEPTH - 1 - slot
-    //    slot 0  → idx = 9   → levels[9] = worst ask  ✓
-    //    slot 9  → idx = 0   → levels[0] = best ask   ✓
-    //    idx >= count → blank row (not enough depth data)
-    //
-    //  Old (buggy) formula: idx = count-1-(BOOK_DEPTH-1-slot)
-    //    that maps slot 0 → idx=0 = best ask at TOP   ✗  (reversed)
-    //
     void draw_asks(const OrderBook& book)
     {
         std::vector<std::pair<double, PriceLevel>> lvls(
@@ -699,21 +694,18 @@ private:
 
         for (int slot = 0; slot < BOOK_DEPTH; slot++)
         {
-            // ── BUG FIX 1 — corrected index mapping ──────────
             int idx = BOOK_DEPTH - 1 - slot;
             int row = R_ASK_0 + slot;
 
-            // Blank the DOM portion of this row
             move(row, DOM_COL);
             std::cout << std::string(DOM_W, ' ');
 
-            if (idx >= count || idx < 0) continue;   // empty slot
+            if (idx >= count || idx < 0) continue;
 
             auto& [price, lvl] = lvls[idx];
             int bar = std::max(1, (int)((double)lvl.total_size / max_sz * MAX_ASK_BAR));
 
             std::cout << clr::R;
-            // Price in center column — asks show price + right side only
             at_dom(row, D_PRICE); cell(fp(price),          9);
             at_dom(row, D_A_SZ);  cell(fi(lvl.total_size), 8);
             at_dom(row, D_A_BAR); std::cout << std::string(bar, '#');
@@ -740,22 +732,6 @@ private:
     }
 
     // ── Bids ─────────────────────────────────────────────────
-    //
-    //  bids map: sorted HIGH → LOW
-    //    levels[0]       = best bid  (highest price, closest to spread)
-    //    levels[count-1] = worst bid (lowest  price, farthest from spread)
-    //
-    //  Display:
-    //    slot 0       → row R_BID_0     (top    = best bid)   ✓ no index fix needed
-    //    slot DEPTH-1 → row R_BID_0+9  (bottom = worst bid)
-    //
-    //  ★ FIXED BAR WIDTH (BUG FIX 2):
-    //    Bar capped at MAX_BID_BAR = 12 chars.
-    //    D_B_BAR = offset +4, bar ends at +15, D_B_SZ starts at +17 → 1-char gap ✓
-    //
-    //    Old code: bar scaled to 12 but placed at C_ORDERS=col 2, C_SIZE=col 10 →
-    //    bar reaching col 13 overwrote SIZE column starting at col 10            ✗
-    //
     void draw_bids(const OrderBook& book)
     {
         std::vector<std::pair<double, PriceLevel>> lvls(
@@ -776,7 +752,6 @@ private:
             if (slot >= count) continue;
 
             auto& [price, lvl] = lvls[slot];
-            // ── BUG FIX 2 — bar width capped to MAX_BID_BAR ──
             int bar = std::max(1, (int)((double)lvl.total_size / max_sz * MAX_BID_BAR));
 
             std::cout << clr::G;
@@ -789,8 +764,6 @@ private:
     }
 
     // ── Time & Sales tape ────────────────────────────────────
-    //  Shares the same row range as the DOM (R_ASK_0 … R_BID_0+DEPTH-1)
-    //  Most-recent trade at row R_ASK_0; older trades below.
     void draw_tape(const OrderBook& book)
     {
         for (int i = 0; i < TAPE_ROWS; i++)
@@ -819,16 +792,12 @@ private:
     }
 
     // ── Order imbalance bar ──────────────────────────────────
-    //  Visualises top-5-level bid vs ask balance.
-    //  Centre mark = neutral.  Green fill = buyers dominant.
-    //  Red fill = sellers dominant.
     void draw_imbalance_bar(const OrderBook& book)
     {
         double imb = book.order_imbalance(5);   // range −1 … +1
 
         const int BAR = 36;
         const int mid = BAR / 2;
-        // Map −1…+1 onto 0…BAR
         int pos = (int)((imb + 1.0) * 0.5 * BAR);
         pos = std::max(0, std::min(BAR, pos));
 
@@ -851,87 +820,13 @@ private:
 
         std::cout << clr::D << "]" << clr::X;
 
-        // Cumulative delta number
         std::string dprefix = (book.cum_delta >= 0) ? "+" : "";
         std::string dcolour = (book.cum_delta >= 0) ? clr::G : clr::R;
         std::cout << "  " << dcolour << "D:" << dprefix << fi(book.cum_delta) << clr::X;
 
-        // Imbalance value
         std::cout << clr::D << "  imb:" << clr::X;
         std::ostringstream imbs;
         imbs << std::fixed << std::setprecision(3) << imb;
         std::cout << ((imb >= 0) ? clr::G : clr::R) << imbs.str() << clr::X;
     }
 };
-
-// ─────────────────────────────────────────────────────────────
-//  SECTION 9 — MAIN
-// ─────────────────────────────────────────────────────────────
-/*int main(int argc, char* argv[])
-{
-    // ── Resolve CSV path ─────────────────────────────────────
-    // Change FALLBACK_PATH to your file location.
-    // When running from Code::Blocks without arguments, this path is used.
-    const std::string FALLBACK_PATH =
-        "D:\\C++_PROJECTS\\L3 OF VISUALISER\\L3 Visualizer\\tmpar_yjsl7.csv";
-
-    std::string csv_path;
-    if (argc >= 2)
-    {
-        csv_path = argv[1];
-    }
-    else if (!FALLBACK_PATH.empty())
-    {
-        csv_path = FALLBACK_PATH;
-        std::cout << "No argument -- using: " << csv_path << "\n";
-    }
-    else
-    {
-        std::cerr << "Usage: " << argv[0] << " <path_to_csv>\n";
-        return 1;
-    }
-
-    OrderBook  book;
-    CSVFeed    feed;
-    Visualizer viz;
-
-    // ── Open file ─────────────────────────────────────────────
-    if (!feed.open(csv_path))
-    {
-        std::cerr << "Error: cannot open \"" << csv_path << "\"\n";
-        std::cerr << "Check FALLBACK_PATH or pass path as argument.\n";
-        return 1;
-    }
-
-    std::cout << "Opened: " << csv_path << "\nStarting display...\n";
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
-
-    // ── Feed loop ─────────────────────────────────────────────
-    FeedMessage msg;
-    int64_t prev_ts = 0;
-
-    while (feed.next(msg))
-    {
-        // Reset clears the book; next render rebuilds chrome
-        if (msg.event_type == EventType::RESET)
-            viz.initialized = false;
-
-        book.process(msg);
-
-        // Re-render at most every 100 ms of feed time, and only
-        // once both sides of the book have data
-        if (msg.timestamp_ns - prev_ts >= 100'000'000LL
-            && !book.bids.empty()
-            && !book.asks.empty())
-        {
-            viz.render(book);
-            std::this_thread::sleep_for(std::chrono::milliseconds(REFRESH_MS));
-            prev_ts = msg.timestamp_ns;
-        }
-    }
-
-    // Show final state and park cursor
-    viz.render(book);
-    std::cout << "\033[" << R_CURSOR + 1 << ";1H\n[END OF FEED]\n";
-    return 0;
-}*/
