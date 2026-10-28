@@ -1,332 +1,568 @@
-# L3 Order Flow Visualizer + Spoofing Detection Engine
+# L3 Order Flow Visualizer + Spoofing Detector
 
-A professional-grade **Level 3 order book visualizer** and **real-time market manipulation detector** built entirely in C++17. Reads raw L3 market data and renders a live Depth of Market terminal display while simultaneously scoring every order for spoofing behaviour.
+A terminal program written in **C++17** that replays raw **Level 3 (L3)** market data, draws a live **Depth of Market (DOM)** screen, and scores every large order for **spoofing** behaviour while it runs.
 
-> Built from scratch as a deep-dive into market microstructure, order flow analysis, and manipulation detection — the same concepts used by proprietary trading firms and regulators.
+> Built as a learning project in market microstructure: how order books work, and how surveillance systems spot manipulation.
+
+**Jump to:**
+[Quick Start](#quick-start) ·
+[Your Data](#your-data-the-csv-file) ·
+[Which Path Are You On?](#which-path-are-you-on) ·
+[Reading the Screen](#reading-the-screen) ·
+[How the Detector Thinks](#how-the-detector-thinks) ·
+[Settings](#settings) ·
+[Tune It](#tune-it-on-your-own-data) ·
+[Troubleshooting](#troubleshooting) ·
+[Limits](#limits-read-this)
 
 ---
 
-## What Is L3 Data?
+## What Is This?
 
-| Level | What You See | Use Case |
+| Data level | What you see | Good for |
 |---|---|---|
-| L1 | Best bid + best ask only | Price display |
-| L2 | Total size per price level | Depth of market |
-| **L3** | **Every individual order ID at every level** | **Order flow analysis, manipulation detection** |
+| L1 | Best bid and best ask only | Showing a price |
+| L2 | Total size at each price | Depth of market |
+| **L3** | **Every single order, at every price** | **Order flow and spotting manipulation** |
 
-L3 is the most granular market data available. It lets you see not just *how much* liquidity exists at a price, but *which specific orders* are there and *how they behave over time*. Without L3, spoofing detection is impossible.
+**Spoofing** means placing big orders you never plan to trade, to trick other traders into moving the price, then cancelling them. L3 data is the only kind detailed enough to see this, because you can watch each order from the moment it appears until it disappears.
 
----
-
-## System Architecture
-
-```
-CSV Feed (L3 Data)
-        │
-        ▼
-┌───────────────────┐
-│   L3_orderflow.cpp│  ← Core engine
-│                   │
-│  ┌─────────────┐  │
-│  │  OrderBook  │  │  Processes: Add, Cancel, Modify,
-│  │  (L3 engine)│  │            Trade, Fill, Reset
-│  └──────┬──────┘  │
-│         │         │
-│  ┌──────┴──────┐  │
-│  │  Visualizer │  │  Two-panel terminal DOM
-│  └─────────────┘  │
-└────────┬──────────┘
-         │
-    ┌────┴────────────────┐
-    │                     │
-    ▼                     ▼
-┌──────────┐     ┌─────────────────┐
-│  DOM     │     │ spoof_detector.h│
-│ Display  │     │                 │
-└──────────┘     │ 1. Single spoof │
-                 │ 2. Layering     │
-                 │ 3. OTR analysis │
-                 └────────┬────────┘
-                          │
-                          ▼
-                   ┌─────────────┐
-                   │ Alert Output│
-                   └─────────────┘
-```
+**What this program does, in one line:** it reads a CSV of L3 events, rebuilds the order book, shows it live, and prints an alert whenever an order looks like a spoof.
 
 ---
 
-## Features
+## Quick Start
 
-### L3 Order Book Engine
-- Full L3 event processing — Add, Cancel, Modify, Trade, Fill, Reset
-- Internal sequential ID system — handles scientific notation order ID collisions in CSV feeds
-- Correct ask/bid display ordering (best ask at bottom of ask section, closest to spread)
-- Auto-detects tab or comma CSV delimiter
+Tick the boxes as you go.
 
-### Terminal Visualizer
-- **Live DOM** — 10 price levels per side (configurable)
-- **Time and Sales tape** — every execution with direction (^ buy / v sell)
-- **Order imbalance bar** — visual bid vs ask pressure
-- **Cumulative delta** — running buy volume minus sell volume
-- **Session fast-forward** — jump directly to NY, London, or Asia session
+### Step 1: Get the files
 
-### Spoofing Detection Engine
-Three independent detection modules running simultaneously:
+- [ ] Download or clone this repo. You need these files in **one folder**: `main.cpp`, `L3_orderflow.cpp`, `spoof_detector.h`.
 
-#### 1. Single Order Spoof Detector
-Watches every large order from placement to removal. On cancel, scores across 5 signals:
+### Step 2: Check you have a C++ compiler
 
-| Signal | Points | Logic |
-|---|---|---|
-| Order size | 0-25 | Larger orders = higher suspicion |
-| Zero fills | 0-25 | Cancelled with no fills = never intended to trade |
-| Lifetime | 0-25 | Under 500ms = placed and pulled before market reacts |
-| Price impact | 0-15 | Did mid-price move in spoofer's favour during order's life |
-| Repeat pattern | 0-10 | Same source doing this repeatedly |
+- [ ] Open a terminal and type `g++ --version`.
 
-#### 2. Layering Detector
-Groups orders by source and side within a 2-second window. Fires when:
-- 3 or more orders placed at different price levels
-- All cancelled within 1 second
-- Zero fills across the entire group
+<details>
+<summary><b>It printed a version</b> (click to see what's next)</summary>
 
-#### 3. OTR (Order-to-Trade Ratio)
-Tracks per-source rolling ratio of orders placed vs orders that resulted in fills.
-```
-OTR = orders_placed / orders_traded
-Alert threshold: OTR > 50 with minimum 20 orders placed
+Great, go to Step 3.
+</details>
+
+<details>
+<summary><b>"g++ is not recognized" on Windows</b> (click to fix)</summary>
+
+If you installed **Code::Blocks**, the compiler is already on your PC. Add it to your PATH for the current PowerShell window:
+
+```powershell
+$env:Path += ";C:\Program Files\CodeBlocks\MinGW\bin"
+g++ --version
 ```
 
-#### Alert Scoring
-| Score | Interpretation |
-|---|---|
-| 0 - 40 | Normal order behaviour |
-| 40 - 60 | Suspicious, monitor this source |
-| 60 - 80 | Probable manipulation |
-| 80 - 100 | Near-certain spoof signature |
+If that folder doesn't exist, search for it:
 
----
-
-## Display Layout
-
-```
- DOM  Last: 25301.00 [+]  Spread: 0.25  Mid: 25301.13
- Vol:45231  Buy:28441  Sell:16790  Delta:+11651
-
- TIME       SIZE    PRICE  |ORD [BID DEPTH  ] BID SZ   PRICE  ASK SZ [ASK DEPTH] ORD
-                           |                           25303.00   500 [######   ]  3
- 13:29:44    50  25301.00 ^|                           25302.75   200 [###      ]  1
- 13:29:44   200  25300.50 v|                           25302.50   800 [#########]  5
- 13:29:43   100  25301.00 v| --- SPREAD 0.25  MID 25301.13 ---
- 13:29:42    50  25301.25 ^|  2 [##       ]  300  25301.00
- 13:29:41   300  25300.75 v|  5 [#########] 1000  25300.75
-                           | IMB[----#####|--------] D:+11651  imb:+0.234
-
-  +------ MANIPULATION ALERTS (2 total) ------+
-  | SPOOF ASK src=FirmA px=25340.00 sz=50 score=82
-  |   [sz=50 +22] [0fills +25] [life=94ms +25] [impact=3.2tks +15]
-  | LAYER BID src=FirmB px=25290.00 sz=4  score=71
-  |   [4 orders +24] [0fills +30] [cancel_span=380ms +15] [3 levels +9]
-  +--------------------------------------------+
+```powershell
+Get-ChildItem "C:\Program Files\CodeBlocks","C:\Program Files (x86)\CodeBlocks" -Recurse -Filter g++.exe -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
 ```
 
----
+Use the folder it prints (without `g++.exe`). You must repeat the `$env:Path` line in every new PowerShell window.
+</details>
 
-## File Structure
+<details>
+<summary><b>"g++: command not found" on Linux / macOS</b> (click to fix)</summary>
 
-```
-project/
-├── main.cpp              <- Entry point, wires everything together
-├── L3_orderflow.cpp      <- OrderBook engine + Visualizer + CSVFeed
-└── spoof_detector.h      <- All three detection modules
-```
+- Ubuntu / Debian: `sudo apt install g++`
+- macOS: `xcode-select --install`
+</details>
 
-Build only `main.cpp` — the other two are included automatically.
+### Step 3: Build
 
----
-
-## Build and Run
-
-**Requirements:** C++17 compiler, ANSI-capable terminal
+- [ ] Go to the project folder and compile **only `main.cpp`**. The other two files are included automatically.
 
 ```bash
 # Linux / macOS
 g++ -std=c++17 -O2 -o market main.cpp
-./market data.csv
 
-# Windows MinGW
+# Windows (MinGW), in PowerShell
 g++ -std=c++17 -O2 -o market.exe main.cpp
-market.exe data.csv
 ```
 
-**Code::Blocks:**
-1. File -> New -> Project -> Console Application -> C++
-2. Add only `main.cpp` to the build
-3. Right-click `L3_orderflow.cpp` -> Properties -> uncheck all build targets
-4. Ctrl+F9 to build, Ctrl+F10 to run
+No output means success.
+
+### Step 4: Run
+
+- [ ] Give it your CSV file and, optionally, a start time (UTC):
+
+```bash
+./market data.csv                 # starts at the time set inside main.cpp (default 14:00:00)
+./market data.csv 00:00:00        # play from the very beginning  <-- good for a first test
+./market data.csv 13:30:00        # jump to the New York open
+```
+
+On Windows use `.\market.exe "data.csv" 00:00:00`.
+
+### Step 5: Use it
+
+- [ ] The program prints the session info and waits 2 seconds.
+- [ ] It **fast-forwards** silently to your start time. It also waits until the book looks healthy (at least 5 price levels per side and a spread of 5.0 or less).
+- [ ] You see a **"JUMPED TO"** summary. **Press ENTER** to start the display.
+- [ ] The live screen plays at real market speed. Alerts appear underneath.
+- [ ] Press **Ctrl+C** to quit.
+
+> **Tip:** use **Windows Terminal** or PowerShell 7 on Windows, and make the window at least **35 rows tall**.
 
 ---
 
-## Configuration
+## Your Data: The CSV File
 
-### CSV Path
-Edit `main.cpp`:
-```cpp
-const std::string FALLBACK_PATH = "D:\\path\\to\\your\\data.csv";
+You bring your own data. The repo does not include any.
+
+### Required layout
+
+Columns are read **by position**, not by name. The first line (header) is skipped. Tabs or commas both work.
+
+| # | Column | Example | Notes |
+|---|---|---|---|
+| 1 | timestamp | `2026-04-05T13:29:43.776471934+0000` | ISO format with fractions of a second. Treated as UTC. |
+| 2 | action | `Add` | `Add`, `Cancel`, `Modify`, `Trade`, `Fill`, `Reset` (also all-lowercase). Other spellings are skipped. |
+| 3 | side | `Buy` | `Buy`, `buy` or `BUY` = buy. **Anything else is treated as sell.** |
+| 4 | price | `25300.75` | Decimal |
+| 5 | size | `5` | Contracts |
+| 6 | order_id | `687509000001` | See the warning below |
+| 7 | source | `TradingFirm_A` | Optional, but needed for one detector filter. See [Which Path Are You On?](#which-path-are-you-on) |
+
+```
+timestamp                           action  side  price     size  order_id      source
+2026-04-05T13:29:43.776471934+0000  Add     Buy   25300.75  5     687509000001  TradingFirm_A
+2026-04-05T13:29:43.776891234+0000  Add     Sell  25301.00  3     687509000002  TradingFirm_B
+2026-04-05T13:29:43.812340000+0000  Trade   Buy   25301.00  2     0
+2026-04-05T13:29:43.812340000+0000  Fill    Buy   25301.00  2     687509000002
+2026-04-05T13:29:44.001230000+0000  Cancel  Buy   25300.75  5     687509000001
 ```
 
-### Session Fast-Forward
-Jump directly to any trading session:
-```cpp
-const std::string SKIP_TO_TIME = "00:00:00";  // Asia open / play from start
-const std::string SKIP_TO_TIME = "08:00:00";  // London open
-const std::string SKIP_TO_TIME = "13:30:00";  // NY open
-const std::string SKIP_TO_TIME = "14:30:00";  // NY + 1 hour
-```
-All messages before the target time are still processed so book state stays accurate.
+### What each action does
 
-### Book Depth and Speed
-```cpp
-// In L3_orderflow.cpp:
-static constexpr int BOOK_DEPTH = 10;    // price levels per side
-static constexpr int REFRESH_MS = 80;    // redraw interval in ms
-```
+| Action | Meaning |
+|---|---|
+| `Add` | A new order joins the book |
+| `Cancel` | An order is removed (matched by order_id) |
+| `Modify` | An order gets a new price and size |
+| `Trade` | An anonymous trade print. Updates the tape, volume and delta. order_id can be `0`. |
+| `Fill` | A **resting order** was hit. order_id is that resting order. Its size shrinks. |
+| `Reset` | Wipe the book and start fresh |
 
-### Detection Thresholds
-```cpp
-// In spoof_detector.h:
-static constexpr int64_t LARGE_ORDER_THRESHOLD = 10;   // min size to watch
-static constexpr int     ALERT_THRESHOLD        = 60;   // min score to alert
-static constexpr double  TICK_SIZE              = 0.25; // NQ futures
-static constexpr int     LAYER_MIN_ORDERS       = 3;    // orders per layer
-static constexpr double  OTR_ALERT_THRESHOLD    = 50.0; // OTR ratio limit
+> **Warning: order IDs.** The program uses `order_id` exactly as it is read. If your file shows IDs in scientific notation (like `6.87509E+12`), different orders can end up with the same ID and overwrite each other. Use plain whole numbers.
+
+<details>
+<summary><b>Click to check your file with PowerShell</b></summary>
+
+Change the column names if your header is different.
+
+```powershell
+$f = "data.csv"
+$d = if ((Get-Content $f -TotalCount 1) -match "`t") { "`t" } else { "," }
+$rows = Get-Content $f -TotalCount 200000 | ConvertFrom-Csv -Delimiter $d
+
+"First 3 rows:"; $rows | Select-Object -First 3
+"Distinct sources: " + ($rows | Group-Object source | Measure-Object).Count
+"IDs in scientific notation: " + @($rows | Where-Object { $_.order_id -match "E" }).Count
 ```
+</details>
 
 ---
 
-## CSV Format
+## Which Path Are You On?
 
-Tab or comma separated. Delimiter auto-detected from header row.
+One detector filter (opposite-side execution) needs to know **who** placed each order. Check your `source` column and pick your row:
 
-```
-timestamp                          action  side  price    size  order_id      source
-2026-04-05T13:29:43.776471934+0000 Add     Buy   25300.75 5     687509000001  TradingFirm_A
-2026-04-05T13:29:43.776891234+0000 Add     Sell  25301.00 3     687509000002  TradingFirm_B
-2026-04-05T13:29:43.812340000+0000 Trade   Buy   25301.00 2     0
-2026-04-05T13:29:43.812340000+0000 Fill    Buy   25301.00 2     687509000002
-2026-04-05T13:29:44.001230000+0000 Cancel  Buy   25300.75 5     687509000001
-```
-
-| Column | Format | Notes |
+| Your `source` column | Path | What works |
 |---|---|---|
-| timestamp | ISO 8601 with nanoseconds | UTC timezone |
-| action | Add / Cancel / Modify / Trade / Fill / Reset | Case-insensitive |
-| side | Buy / Sell | Case-insensitive |
-| price | Decimal | Any precision |
-| size | Integer or float | Contracts |
-| order_id | Integer or scientific notation | 6.87509E+12 handled correctly |
-| source | String | Market participant identifier |
+| Missing, empty, or the **same value on every row** | **Path B: no identity** | All filters except opposite-side execution and the repeat signal |
+| **Different values** for different participants | **Path A: identity available** | Everything |
 
-**Order ID collision handling:** Scientific notation in CSV loses precision, causing multiple orders to share the same parsed ID. This system assigns internal sequential IDs and maintains an external-to-internal mapping, ensuring correct cancel and fill routing even with imprecise source data.
+The program tells you at the end of every run: if it prints a **NOTE** about the `source` column, you are on Path B.
+
+<details>
+<summary><b>Why can't the order ID tell who the trader is?</b></summary>
+
+Every order gets its own unique ID, so two orders from the same trader have unrelated IDs. In public market data, the ID is just a number the exchange hands out. The firm, trader and account behind it are hidden. Only the exchange, brokers and regulators can see them.
+
+So the detector can only link a trader's orders together if your data has a `source` column that says so.
+</details>
+
+<details>
+<summary><b>How do investigators find a real spoofer?</b></summary>
+
+1. The exchange's surveillance system flags a pattern (this program does this step).
+2. The exchange pulls its full order log. Every order carries a firm / session / trader ID that the public feed hides. It shows that the big fake orders and the real trades came from the **same login**.
+3. The broker links that login to a real customer account.
+4. The regulator lines up orders, trades and profits, and checks whether it happened repeatedly.
+5. They look for proof of **intent**: chats, emails, phone calls, trading-program code.
+6. Penalties follow: fine, ban, or criminal referral.
+
+This program covers step 1 only.
+</details>
 
 ---
 
-## How the L3 Engine Works
+## Reading the Screen
 
 ```
-FeedMessage
-     │
-     ├── ADD    -> assign internal_id, insert into bids/asks + order_map
-     ├── CANCEL -> resolve external->internal ID, remove from level
-     ├── MODIFY -> adjust size; if price changed, move to new level
-     ├── TRADE  -> record execution, update delta and tape
-     ├── FILL   -> reduce resting order size, remove if fully filled
-     └── RESET  -> clear entire book, reset ID mappings
+ TIME       SIZE    PRICE  |ORD [BID DEPTH  ] BID SZ   PRICE  ASK SZ [ASK DEPTH] ORD
+                           |                           25303.00   500 [######   ]  3
+ 13:29:44    50  25301.00 ^|                           25302.75   200 [###      ]  1
+ 13:29:44   200  25300.50 v| --- SPREAD 0.25  MID 25301.13 ---
+ 13:29:43   100  25301.00 v|  2 [##       ]  300  25301.00
+                           |  5 [#########] 1000  25300.75
+                           | IMB[----#####|--------] D:+11651  imb:+0.234
 ```
 
-**Key data structures:**
-- `bids` — `std::map` sorted high to low
-- `asks` — `std::map` sorted low to high
-- `order_map` — `unordered_map` keyed by internal ID, O(1) lookup
-- `ext_to_int` — external to internal ID mapping for collision handling
+| Part | Meaning |
+|---|---|
+| **Left panel** | Time and Sales tape: every trade. `^` = buyer hit the offer, `v` = seller hit the bid. |
+| **Right panel** | The DOM: asks on top (best ask at the bottom of that block), bids below. Each row shows order count, size and a depth bar. |
+| **Title rows** | Feed time, last price, spread, mid price, total volume, buy volume, sell volume, and **delta** (buy volume minus sell volume). |
+| **IMB bar** | Which side has more resting size in the top levels. `imb` runs from -1 (all asks) to +1 (all bids). |
+| **Alerts box** | Appears under the screen once the detector finds something. |
 
 ---
 
-## Why This Project Exists
+## How the Detector Thinks
 
-Most retail trading tools show L2 data — price levels with aggregated sizes. What you cannot see from L2:
+### The idea in four steps
 
-- Whether a large order is genuine or a decoy
-- Whether the same participant places and cancels repeatedly
-- Whether multiple orders at different levels come from the same actor
-- Whether a fill actually happened or the order simply disappeared
+1. **Watch** every big order from the moment it is placed.
+2. **Wait.** When one is cancelled, hold on for 1 second of feed time. A fill might still arrive.
+3. **Score** it from 0 to 100 using the eight questions below.
+4. **Alert** if the score reaches `ALERT_THRESHOLD` (default **40**).
 
-L3 data exposes all of this. This project processes L3 at the order level and applies scoring logic similar to what exchange surveillance systems use to flag suspicious behaviour before it goes to a human reviewer.
+### Which orders get watched?
+
+An order must pass all three gates:
+
+| Gate | Rule | Default |
+|---|---|---|
+| **1. Not tiny** | Size at least `LARGE_ORDER_THRESHOLD` | 2 |
+| **2. Close to the market** (filter #2) | No more than `MAX_WATCH_DISTANCE_TICKS` behind the best price on its side | 20 ticks |
+| **3. Big for the book or for the trader** (filter #4) | At least `MIN_DEPTH_SHARE` of the visible depth on its side **or** at least `MIN_SIZE_RATIO` times that source's usual order size | 10% or 4x |
+
+### The eight questions (max 100 points)
+
+| Signal | Plain-English question | Max |
+|---|---|---|
+| **Opposite-side execution** (filter #1) | Did the same source get a real fill on the *other* side while this order sat there (or within 1s after)? | **25** |
+| **Relative size** (filter #4) | How big is it versus the visible book and versus this trader's normal orders? | 15 |
+| **Zero fills** | Was it cancelled without trading? (15 for none, 8 if less than 25% filled) | 15 |
+| **Lifetime** | How fast was it pulled? (under 100ms = 10, under 500ms = 6, under 2s = 2) | 10 |
+| **Price impact** | Did the mid price move the way a spoofer wants? Bid spoof wants **up**, ask spoof wants **down**. (2 ticks = 5, 4 ticks = 10) | 10 |
+| **Closeness to the touch** (filter #2) | How near the best price was it placed? (1 tick = 10, up to 3 = 7, up to 6 = 4, further = 1) | 10 |
+| **Cancel-on-approach** (filter #3) | Was it pulled just as the market ran toward it? (price moved 2+ ticks closer; full marks if now within 3 ticks) | 10 |
+| **Repeat** | Did this source already cancel 2+ big zero-fill orders in the last 60 seconds? | 5 |
+
+Opposite-side execution and Repeat only work on **Path A** (see above).
+
+### What an alert looks like
+
+```
+  +------ SPOOF ALERTS (1 total) ------+
+  | 13:29:41 BID  src=FirmA px=24999.50 sz=40 life=100ms score=61
+  |   [size=40 71.4%depth x40.0med +15] [0fills +15] [life=100ms +6] [opp-side fills=3 +18] [dist=2.0tks +7]
+  +----------------------------------------------+
+```
+
+Line 1: when, which side, who, price, size, how long it lived, total score.
+Line 2: **why**, one tag per signal with the points it added.
+
+| Tag | Means |
+|---|---|
+| `size=40 71.4%depth x40.0med` | 40 lots, 71.4% of visible depth, 40 times this source's median order |
+| `0fills` or `<25%filled` | Cancelled with no (or little) fill |
+| `life=100ms` | How long it lived |
+| `impact=2.0tks` | Mid moved 2 ticks in the spoofer's favour |
+| `repeat=2` | Two earlier zero-fill cancels by this source |
+| `opp-side fills=3` | 3 lots filled on the other side for the same source |
+| `approach=3.0tks gap=1.0` | Market moved 3 ticks closer; it was cancelled 1 tick from the opposite touch |
+| `dist=2.0tks` | Placed 2 ticks behind the best price on its side |
+
+### How to read the score
+
+Rules of thumb, not statistics:
+
+| Score | Meaning |
+|---|---|
+| Below 40 | Not shown |
+| 40 to 60 | Worth a look |
+| 60 to 80 | Probably suspicious |
+| 80 and up | Very strong spoof pattern |
+
+> **A high score is a lead, not proof.** Genuine market makers also cancel fast. See [Limits](#limits-read-this).
+
+<details>
+<summary><b>For developers: how the pieces connect (click to expand)</b></summary>
+
+```
+CSV file ──> CSVFeed ──> main.cpp loop ──> OrderBook (L3 book) ──> Visualizer (screen)
+                              │
+                              └──> SpoofDetector (spoof_detector.h) ──> alerts
+```
+
+Call order inside the loop (see `main.cpp`):
+
+```cpp
+detector.tick(ts, time_str);          // every message, first
+detector.on_add(book, order);         // AFTER  book.process(add)
+detector.on_cancel(book, order, ts);  // BEFORE book.process(cancel)
+detector.on_fill(order, qty, ts);     // BEFORE book.process(fill)
+detector.on_reset();                  // on a Reset message
+detector.flush();                     // at end of feed
+```
+
+The order matters. `on_cancel` and `on_fill` must run **before** the book changes, so the order is still there to read.
+
+Data structures: `bids` is a `std::map` sorted high to low, `asks` sorted low to high, and `order_map` is an `unordered_map` from order ID to order.
+</details>
 
 ---
 
-## How Regulators Actually Catch Spoofing
+## Settings
 
-Exchange surveillance systems flag orders automatically using similar signals. When a flag fires:
+Everything is a constant at the top of a file. Change it, then rebuild (Step 3).
 
-1. Exchange sends a suspicious activity report to the regulator
-2. Regulator reconstructs the full book at that moment using stored L3 data
-3. Account identity behind the order ID is revealed (we only see order IDs — they see the trader)
-4. Chat logs, emails, and phone records are subpoenaed
-5. Civil or criminal referral follows if intent is proven
+### I want to...
 
-Famous cases: Navinder Sarao (Flash Crash 2010, $38M fine), JPMorgan precious metals desk ($920M fine), Tower Research Capital ($67M fine).
+| I want to... | Change this | In |
+|---|---|---|
+| See **fewer** alerts | Raise `ALERT_THRESHOLD` (try 55 to 60) | `spoof_detector.h` |
+| See **more** alerts | Lower `ALERT_THRESHOLD` | `spoof_detector.h` |
+| Watch only **bigger** orders | Raise `LARGE_ORDER_THRESHOLD` | `spoof_detector.h` |
+| Use a different **instrument** | Set `TICK_SIZE` to its tick (NQ = 0.25) | `spoof_detector.h` |
+| Start at a different **time** | Pass it as the 2nd argument, or edit `SKIP_TO_TIME` | `main.cpp` |
+| Play **faster or slower** | `PLAYBACK_SPEED` (2.0 = twice as fast) | `main.cpp` |
+| Stop long quiet gaps from freezing playback | Lower `MAX_GAP_NS` | `main.cpp` |
+| Change the book-ready check | `MIN_DEPTH_LEVELS`, `MAX_WARMUP_SPREAD` | `main.cpp` |
+| Show more or fewer price levels | `BOOK_DEPTH` | `L3_orderflow.cpp` |
 
-Our detector performs step 1 — the automated flagging. Everything after requires regulatory access to identity data.
+<details>
+<summary><b>All detector settings (click to expand)</b></summary>
+
+| Constant | Default | What it does |
+|---|---|---|
+| `TICK_SIZE` | 0.25 | Smallest price step of the instrument |
+| `ALERT_THRESHOLD` | 40 | Minimum score to show an alert |
+| `LARGE_ORDER_THRESHOLD` | 2 | Smallest order size ever watched |
+| `DEPTH_LEVELS` | 10 | Price levels used to measure visible depth |
+| `MIN_DEPTH_SHARE` | 0.10 | Watch if size is at least this share of side depth |
+| `MIN_SIZE_RATIO` | 4.0 | ...or at least this many times the source's median size |
+| `SIZE_HISTORY` / `MIN_SIZE_HISTORY` | 50 / 8 | How many past orders feed that median / how many are needed |
+| `MAX_WATCH_DISTANCE_TICKS` | 20 | Ignore orders further behind the best price than this |
+| `MIN_LIFETIME_NS` | 500 ms | Limit for the "fast cancel" signal |
+| `PRICE_IMPACT_TICKS` | 2.0 | Mid move needed for price-impact points |
+| `OPP_LOOKBACK_NS` | 5 s | How far back to look for opposite-side fills |
+| `OPP_POST_CANCEL_NS` | 1 s | How long to wait after a cancel for opposite-side fills |
+| `APPROACH_MIN_TICKS` | 2.0 | How much closer the market must come |
+| `APPROACH_NEAR_TICKS` | 3.0 | Distance for full approach points |
+| `REPEAT_WINDOW_NS` | 60 s | Window for the repeat signal |
+</details>
 
 ---
 
-## Known Limitations
+## Tune It On Your Own Data
 
-- **Source field identity**: Works best when source = unique participant ID. If all orders share one source string (e.g. data provider name), source-based layering groups all orders together.
-- **Scientific notation IDs**: Collision resolution is LIFO — cancel events pick the most recently added order with that external ID when multiple collide.
-- **CSV replay only**: No live feed support yet. Swap CSVFeed for a WebSocket reader to go live — OrderBook, Visualizer, and SpoofDetector require no changes.
-- **Terminal rendering**: Requires ANSI-capable terminal, minimum 35 rows height.
+Do this once per dataset. It takes about ten minutes.
+
+1. **Check your file** with the PowerShell snippet in [Your Data](#your-data-the-csv-file). Note the number of distinct sources.
+2. **Set `TICK_SIZE`** for your instrument.
+3. **Set `LARGE_ORDER_THRESHOLD`.** Find how big the orders are, then start near the 99th percentile of `Add` sizes:
+
+   ```powershell
+   $f = "data.csv"
+   $d = if ((Get-Content $f -TotalCount 1) -match "`t") { "`t" } else { "," }
+   $rows = Get-Content $f -TotalCount 200000 | ConvertFrom-Csv -Delimiter $d
+   $sizes = $rows | Where-Object { $_.action -eq "Add" } | ForEach-Object { [double]$_.size } | Sort-Object
+   foreach ($p in 50,90,99,99.9) { "{0}th percentile size: {1}" -f $p, $sizes[[math]::Min($sizes.Count-1,[int]($sizes.Count*$p/100))] }
+   ```
+4. **Run once with `ALERT_THRESHOLD = 30`** to see what scores real flagged orders get.
+5. **Raise the threshold** until you only get a handful of alerts per session that you would genuinely want to review.
+6. **Check the top alerts by hand.** Find the time in the CSV and read the order flow around it. Does it really look like a spoof?
+
+---
+
+## Troubleshooting
+
+<details>
+<summary><b>"market.exe is not recognized"</b></summary>
+
+You are in the wrong folder, or you have not built it yet. Go to the project folder first:
+
+```powershell
+cd "D:\path\to\your\project"
+g++ -std=c++17 -O2 -o market.exe main.cpp
+.\market.exe "data.csv" 00:00:00
+```
+
+If you built with Code::Blocks, the program is in a `bin\Debug` or `bin\Release` folder instead, and has your project's name.
+</details>
+
+<details>
+<summary><b>"Cannot open: D:\..."</b></summary>
+
+You ran it without a file path, so it tried the path written inside `main.cpp` (`FALLBACK_PATH`). Always pass your own file: `.\market.exe "data.csv"`.
+</details>
+
+<details>
+<summary><b>The screen is full of <code>←[2J</code> and odd characters</b></summary>
+
+Your console is not drawing ANSI colour codes. Open **Windows Terminal** from the Start menu and run it there. The program already turns on ANSI support on Windows, but the old console window (and some IDE run windows) can ignore it.
+</details>
+
+<details>
+<summary><b>It stays on "Fast-forwarding..." or jumps straight to [END OF FEED]</b></summary>
+
+The start time is after the end of your data, or the book never became "ready" (5 levels per side, spread 5.0 or less). Try:
+
+```powershell
+.\market.exe "data.csv" 00:00:00
+```
+
+Or loosen `MIN_DEPTH_LEVELS` and `MAX_WARMUP_SPREAD` in `main.cpp`.
+</details>
+
+<details>
+<summary><b>The book looks wrong, or everything is on the sell side</b></summary>
+
+Check your CSV spelling. Actions must be written like `Add` or `add`, and side must be `Buy`, `buy` or `BUY`. Any other side text is treated as **sell**. Rows with unknown actions are skipped silently.
+</details>
+
+<details>
+<summary><b>The screen works but there are no alerts</b></summary>
+
+That can simply mean there was no spoofing. If you want to be sure the detector is looking:
+
+- Is `LARGE_ORDER_THRESHOLD` higher than almost every order in your file? Lower it.
+- Is your data very quiet (volume 0, tiny orders)? Try a busier time window.
+- Try `ALERT_THRESHOLD = 30` once.
+- Look for the NOTE at the end about the `source` column. Without identity, the two strongest signals are off.
+</details>
+
+<details>
+<summary><b>Far too many alerts</b></summary>
+
+Raise `ALERT_THRESHOLD` and `LARGE_ORDER_THRESHOLD`. Fast-cancelling market makers can look like spoofers on their own. See [Limits](#limits-read-this).
+</details>
+
+<details>
+<summary><b>Linker error about threads</b></summary>
+
+Build with `-pthread`:
+
+```bash
+g++ -std=c++17 -O2 -pthread -o market main.cpp
+```
+</details>
+
+<details>
+<summary><b>The display is cut off or garbled</b></summary>
+
+Make the terminal window at least 35 rows tall, then restart the program.
+</details>
+
+---
+
+## Limits (Read This)
+
+- **A score is not proof.** Real cases need intent, account identity and records that only exchanges, brokers and regulators have. Treat alerts as a list to review.
+- **Identity depends on your data.** Without a useful `source` column, opposite-side execution and the repeat signal cannot work.
+- **Market makers can look like spoofers.** They also place and cancel fast. A per-source baseline would help, and is not built yet.
+- **CSV replay only.** There is no live feed yet.
+- **Order IDs are used as they are.** Duplicate or scientific-notation IDs will confuse the book.
+- **The fast-forward part is not scanned.** Orders added before the jump are not watched.
+- **Modify events are not scored**, so "shrink instead of cancel" tricks are missed.
+- **One instrument, one tick size.** `TICK_SIZE` is a single constant.
+- **Alerts arrive about 1 second (of feed time) after the cancel**, because the detector waits for late fills.
+- **Terminal needs ANSI support** and at least 35 rows.
+- **Not built yet:** layering-group detection and order-to-trade-ratio tracking.
+
+---
+
+## Project Files
+
+| File | What it is |
+|---|---|
+| `main.cpp` | Entry point. Reads the CSV, runs the loop, handles fast-forward and playback speed. **Build this one.** |
+| `L3_orderflow.cpp` | The order book engine, the CSV reader and the terminal display. Included by `main.cpp`. |
+| `spoof_detector.h` | The spoof detector and all its settings. Included by `main.cpp`. |
+| `L3 Visualizer.cbp` | Code::Blocks project file. Add only `main.cpp` to the build. |
+| `LICENSE` | MIT license |
+
+<details>
+<summary><b>Using Code::Blocks</b></summary>
+
+1. Open `L3 Visualizer.cbp`.
+2. Make sure **only `main.cpp`** is built. Right-click `L3_orderflow.cpp`, choose **Properties**, and untick all build targets.
+3. Press **Ctrl+F9** to build. The program ends up in a `bin` folder inside the project.
+4. Run it from a terminal with your CSV path (Step 4), because Code::Blocks's run window may not draw colours.
+</details>
+
+<details>
+<summary><b>What changed in this version</b></summary>
+
+**New filters:** opposite-side execution, closeness to the touch, cancel-on-approach, and relative size.
+
+**Changes to existing behaviour:**
+- The **price-impact signal was backwards** (it rewarded price moving *toward* the order). It now rewards price moving in the spoofer's favour.
+- The score budget was rebalanced to make room (still 100 maximum).
+- `LARGE_ORDER_THRESHOLD` is now only a minimum size. Orders must also be large for the book or for their source.
+- Alerts now show the time and the source.
+- Fully filled orders are now released from the watch list.
+- The repeat signal now counts only earlier zero-fill cancels within 60 seconds.
+- Alerts are delayed about 1 second so late fills can be counted.
+</details>
+
+---
+
+## How Regulators Catch Spoofing
+
+Exchange surveillance systems flag orders with signals like the ones above. After a flag, the exchange hands the full order log to the regulator, the broker identifies the account behind the login, and investigators gather communications to prove intent. Well-known cases include Navinder Sarao (Flash Crash 2010, $38M), the JPMorgan precious metals desk ($920M), and Tower Research Capital ($67M).
 
 ---
 
 ## Roadmap
 
-- [ ] Footprint chart — bid vs ask volume at each price level
-- [ ] Volume profile — total volume per price across session
-- [ ] Iceberg order detector — refill pattern at same level
-- [ ] Absorption detection — large flow absorbed without price moving
-- [ ] VWAP and standard deviation bands
-- [ ] Live WebSocket feed — Binance free API as first target
-- [ ] Web dashboard replacing terminal display
-- [ ] ML classification model trained on confirmed spoof patterns
+- [x] Opposite-side execution, distance from touch, cancel-on-approach, relative size
+- [ ] Handle Modify events (shrink or reprice instead of cancel)
+- [ ] Layering-group detector (several same-side orders cancelled together)
+- [ ] Order-to-trade ratio per source
+- [ ] Per-source baseline to reduce market-maker false positives
+- [ ] Pseudo-identity for anonymous data (group orders that act like one trader)
+- [ ] Footprint chart and volume profile
+- [ ] Iceberg and absorption detection
+- [ ] Live WebSocket feed (Binance free API as a first target)
+- [ ] Web dashboard instead of the terminal
+- [ ] ML model trained on confirmed spoof patterns
 
 ---
 
 ## Learning Resources
 
 **Books**
-- *Trading and Exchanges* — Larry Harris (market microstructure)
-- *Market Microstructure Theory* — Maureen O'Hara
-- *Flash Boys* — Michael Lewis (accessible introduction)
+- *Trading and Exchanges* by Larry Harris (market microstructure)
+- *Market Microstructure Theory* by Maureen O'Hara
+- *Flash Boys* by Michael Lewis (easy introduction)
 
-**Academic Papers**
-- Cont, Kukanov, Stoikov (2014) — *The Price Impact of Order Book Events*
-- Cao, Chen, Griffin (2005) — *Informational Content of Order Flow*
+**Papers**
+- Cont, Kukanov, Stoikov (2014): *The Price Impact of Order Book Events*
+- Cao, Chen, Griffin (2005): *Informational Content of Order Flow*
 
-**Regulations**
-- Dodd-Frank Act Section 747 — US spoofing prohibition
-- MiFID II Article 12 — European market manipulation rules
+**Rules**
+- Dodd-Frank Act Section 747 (US spoofing ban)
+- EU Market Abuse Regulation, Article 12 (market manipulation)
 
 ---
 
 ## License
 
-MIT License — free to use, modify, and distribute with attribution.
-
----
+MIT License. Free to use, modify and distribute with attribution.
 
 ## Author
 
-Built as an independent research project into market microstructure and L3 order flow analysis. Order book engine, visualizer, and detection logic written from scratch in C++17.
+Built as an independent research project into market microstructure and L3 order flow analysis. The order book engine, visualizer and detection logic are written from scratch in C++17.
