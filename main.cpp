@@ -62,7 +62,7 @@
 // ─────────────────────────────────────────────────────────────
 
 //                        ↓ change this
-const std::string SKIP_TO_TIME = "14:00:00";   // NY session open
+const std::string SKIP_TO_TIME = "14:01:00";   // NY session open
 
 // Common session start times:
 // const std::string SKIP_TO_TIME = "00:00:00"; // Asia open (or play from start)
@@ -97,7 +97,7 @@ static constexpr double MAX_WARMUP_SPREAD  = 5.0;   // don't start until spread 
 
 // 1.0 = real-time (matches actual elapsed market time)
 // 2.0 = 2x speed, 0.5 = half speed, etc.
-static constexpr double PLAYBACK_SPEED = 1.0;
+static constexpr double PLAYBACK_SPEED = 30.0;
 
 // Hard cap on how long any single real-time wait can be, in nanoseconds.
 // Prevents long genuine market gaps (lunch lulls, session boundaries)
@@ -252,32 +252,38 @@ int main(int argc, char* argv[])
         }
 
         // ── NORMAL PROCESSING (after reaching target time) ────
-        double mid = book.mid_price();
+        // Detector clock first: finalises cancels whose post-cancel
+        // observation window has closed (opposite-side check).
+        detector.tick(msg.timestamp_ns, msg.time_str);
 
         if (msg.event_type == EventType::RESET)
         {
             viz.initialized = false;
+            detector.on_reset();
             book.process(msg);
         }
         else if (msg.event_type == EventType::ADD)
         {
+            // AFTER the add, so the detector sees the book with the new order in it
             book.process(msg);
             auto it = book.order_map.find(msg.order_id);
             if (it != book.order_map.end())
-                detector.on_add(it->second, mid);
+                detector.on_add(book, it->second);
         }
         else if (msg.event_type == EventType::CANCEL)
         {
+            // BEFORE the cancel: the order (and its fill history) is still in the book
             auto it = book.order_map.find(msg.order_id);
             if (it != book.order_map.end())
-                detector.on_cancel(it->second, mid, msg.timestamp_ns);
+                detector.on_cancel(book, it->second, msg.timestamp_ns);
             book.process(msg);
         }
         else if (msg.event_type == EventType::FILL)
         {
+            // BEFORE the fill: detector computes the remaining size itself
             auto it = book.order_map.find(msg.order_id);
             if (it != book.order_map.end())
-                detector.on_fill(it->second);
+                detector.on_fill(it->second, msg.size, msg.timestamp_ns);
             book.process(msg);
         }
         else
@@ -307,10 +313,15 @@ int main(int argc, char* argv[])
     }
 
     // ── End of feed ───────────────────────────────────────────
+    detector.flush();   // score cancels still waiting on their post-cancel window
     viz.render(book, msg.time_str);
     detector.print_alerts(10);
     std::cout << "\n[END OF FEED]\n";
     std::cout << "Total messages skipped : " << skip_count << "\n";
     std::cout << "Total spoof alerts     : " << detector.alert_count() << "\n";
+    if (detector.distinct_sources() < 2)
+        std::cout << "NOTE: the 'source' column has fewer than 2 distinct values in the part of the\n"
+                  << "      feed that was played. Opposite-side execution and repeat signals need\n"
+                  << "      per-participant IDs, so they were inactive.\n";
     return 0;
 }
