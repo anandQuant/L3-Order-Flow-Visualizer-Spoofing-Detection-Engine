@@ -44,6 +44,12 @@
 //  at full CPU speed with no sleeping, so it costs milliseconds of
 //  real time no matter how long the underlying warm-up actually took.
 // ============================================================
+#ifdef _WIN32
+  #ifndef NOMINMAX
+    #define NOMINMAX
+  #endif
+  #include <windows.h>
+#endif
 
 #include "L3_orderflow.cpp"
 #include "spoof_detector.h"
@@ -101,6 +107,14 @@ static constexpr int64_t MAX_GAP_NS = 1'000'000'000LL;   // 1 second
 
 int main(int argc, char* argv[])
 {
+    #ifdef _WIN32
+    SetConsoleOutputCP(CP_UTF8);
+    HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD mode = 0;
+    if (GetConsoleMode(h, &mode))
+        SetConsoleMode(h, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+    #endif
+
     // ── CSV path ─────────────────────────────────────────────
     const std::string FALLBACK_PATH =
         "D:\\C++_PROJECTS\\L3 OF VISUALISER\\L3 Visualizer\\tmpar_yjsl7.csv";
