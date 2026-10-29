@@ -1,5 +1,5 @@
 // ============================================================
-//  SPOOF DETECTOR v2 — plugs into the existing L3 OrderBook
+//  SPOOF DETECTOR v2.1 — plugs into the existing L3 OrderBook
 //  Include this in main.cpp AFTER L3_orderflow.cpp.
 //
 //  Usage (see main.cpp for the exact call order):
@@ -23,9 +23,14 @@
 //      MAX_WATCH_DISTANCE_TICKS, and closer orders score higher.
 //   #3 Cancel-on-approach      — the order is pulled as the opposite
 //      touch moves toward it (about to be hit), not simply expired.
-//   #4 Relative size           — size as a share of visible depth AND
-//      versus the source's own recent order sizes, instead of a fixed
-//      contract count.
+//   #4 Relative size           — an order is only watched if it is a
+//      meaningful share (MIN_DEPTH_SHARE) of the RECENT AVERAGE visible
+//      depth on its side (exponential average, AVG_DEPTH_WINDOW_S), so
+//      the yardstick adapts to the instrument and the time of day without
+//      a fixed contract count, and does not shrink when the book suddenly
+//      thins.  Optionally also "x times the source's own median size"
+//      (MIN_SIZE_RATIO, off by default: it flags a fixed slice of every
+//      source's orders and was the main source of false alerts in tests).
 //
 //  SCORE BUDGET (max 100)
 //    relative size 15 | zero fills 15 | lifetime 10 | price impact 10
@@ -50,23 +55,34 @@
 static constexpr double  TICK_SIZE = 0.25;
 // Instrument tick size.
 
-static constexpr int     ALERT_THRESHOLD = 60;
+static constexpr int     ALERT_THRESHOLD = 40;
 // Spoof score >= this triggers a printed alert. 0-100 scale.
 
 // ── Watch gate: which resting orders are tracked at all ──────
-static constexpr int64_t LARGE_ORDER_THRESHOLD = 4;
-// Absolute floor. Orders smaller than this are never watched.
-// For NQ real data: raise this (10+ is notable). It is only a floor now;
-// the order must ALSO be large relative to depth or to its source's norm.
+static constexpr int64_t LARGE_ORDER_THRESHOLD = 10;
+// Tiny sanity floor only (contracts). Orders smaller than this are never
+// watched. The real size test is MIN_DEPTH_SHARE below, which adapts to the
+// market, so you normally do NOT need to tune this per instrument.
 
 static constexpr int     DEPTH_LEVELS = 10;
 // Number of price levels per side used to measure "visible depth".
 
-static constexpr double  MIN_DEPTH_SHARE = 0.10;
-// #4: watch an order if it is >= this share of visible same-side depth...
+static constexpr double  MIN_DEPTH_SHARE = 0.03;
+// #4: watch an order if it is >= this share of the RECENT AVERAGE visible
+// depth on its side (the larger of the average and the depth right now is
+// used, so a thin moment never makes ordinary orders look big).
+// Lower (0.02) catches smaller spoof orders but adds noise; higher (0.05)
+// is quieter but can miss a ladder spread over many small orders.
 
-static constexpr double  MIN_SIZE_RATIO = 2.0;
-// #4: ...or >= this multiple of the source's median recent order size.
+static constexpr double  AVG_DEPTH_WINDOW_S = 300.0;
+// #4: time constant (seconds of feed time) of the average-depth yardstick.
+// 60-300 s behaved the same in tests. The first minute after start-up
+// behaves like "depth right now" while the average warms up.
+
+static constexpr double  MIN_SIZE_RATIO = 0.0;
+// #4 (optional): ALSO watch an order that is >= this multiple of its
+// source's median recent order size. 0 = off (recommended: with 4-10 it
+// added dozens of false alerts on market-maker quotes).
 
 static constexpr size_t  SIZE_HISTORY = 50;
 // #4: how many recent adds per source feed that median.
@@ -175,23 +191,28 @@ public:
         hist.push_back(o.orig_size);
         if (hist.size() > SIZE_HISTORY) hist.pop_front();
 
-        // ── Gate 1: absolute floor ───────────────────────────
-        if (o.orig_size < LARGE_ORDER_THRESHOLD) return;
-
+        // ── Recent average visible depth (#4) ────────────────
+        // Sampled on EVERY add, watched or not, so the yardstick reflects
+        // the market and not only the orders that pass the gates.
         const BookSnap s = snap(book, true);
+        update_avg_depth(s, o.timestamp_ns);
+
+        // ── Gate 1: tiny sanity floor ────────────────────────
+        if (o.orig_size < LARGE_ORDER_THRESHOLD) return;
 
         // ── Gate 2 (#2): too far behind the touch to matter ──
         const double dist = dist_behind_touch(o.side, o.price, s);
         if (dist > MAX_WATCH_DISTANCE_TICKS) return;
 
-        // ── Gate 3 (#4): large vs depth OR vs this source's norm
+        // ── Gate 3 (#4): large vs RECENT AVERAGE depth ───────
         const int64_t side_depth = (o.side == Side::BUY) ? s.bid_depth : s.ask_depth;
-        const double  denom      = (double)std::max<int64_t>(side_depth, o.orig_size);
+        const double  avg_depth  = (o.side == Side::BUY) ? avg_bid_depth_ : avg_ask_depth_;
+        const double  denom      = std::max({(double)side_depth, avg_depth, (double)o.orig_size});
         const double  share      = (double)o.orig_size / denom;
         const double  ratio      = (ratio_valid && median > 0.0)
                                    ? (double)o.orig_size / median : 0.0;
         const bool big = share >= MIN_DEPTH_SHARE
-                      || (ratio_valid && ratio >= MIN_SIZE_RATIO);
+                      || (MIN_SIZE_RATIO > 0.0 && ratio_valid && ratio >= MIN_SIZE_RATIO);
         if (!big) return;
 
         WatchedOrder w;
@@ -256,7 +277,7 @@ public:
     }
 
     // Book was wiped: resting orders no longer exist.
-    void on_reset() { watched_.clear(); }
+    void on_reset() { watched_.clear(); avg_init_ = false; }
 
     // End of feed: score everything still waiting.
     void flush()
@@ -345,7 +366,30 @@ private:
     std::unordered_map<std::string, std::deque<int64_t>>  repeat_;      // repeat signal
     std::string                                           now_str_;
 
+    // Recent average visible depth per side (#4), exponentially weighted.
+    double   avg_bid_depth_ = 0.0;
+    double   avg_ask_depth_ = 0.0;
+    int64_t  avg_ts_        = 0;
+    bool     avg_init_      = false;
+
     // ── Helpers ──────────────────────────────────────────────
+
+    void update_avg_depth(const BookSnap& s, int64_t ts_ns)
+    {
+        if (!avg_init_)
+        {
+            avg_bid_depth_ = (double)s.bid_depth;
+            avg_ask_depth_ = (double)s.ask_depth;
+            avg_ts_        = ts_ns;
+            avg_init_      = true;
+            return;
+        }
+        if (ts_ns <= avg_ts_) return;
+        const double a = 1.0 - std::exp(-(double)(ts_ns - avg_ts_) / (AVG_DEPTH_WINDOW_S * 1e9));
+        avg_bid_depth_ += a * ((double)s.bid_depth - avg_bid_depth_);
+        avg_ask_depth_ += a * ((double)s.ask_depth - avg_ask_depth_);
+        avg_ts_         = ts_ns;
+    }
 
     static double median_of(const std::deque<int64_t>& h)
     {
@@ -492,7 +536,7 @@ private:
                 pts_f += std::min(7.0, (w.size_ratio - 1.0) / 9.0 * 7.0);
             const int pts = (int)std::lround(pts_f);
             a.score += pts;
-            r << "[size=" << w.orig_size << " " << (w.depth_share * 100.0) << "%depth";
+            r << "[size=" << w.orig_size << " " << (w.depth_share * 100.0) << "%avgdepth";
             if (w.ratio_valid) r << " x" << w.size_ratio << "med";
             r << " +" << pts << "] ";
         }
