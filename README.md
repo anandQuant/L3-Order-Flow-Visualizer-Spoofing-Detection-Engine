@@ -91,7 +91,15 @@ No output means success.
 
 ### Step 4: Run
 
-- [ ] Give it your CSV file and, optionally, a start time (UTC):
+- [ ] **Easiest way:** run it with nothing after the name. It asks which CSV file (type the path, or drag the file into the window) and which start time (UTC). It remembers both, so the next run is just ENTER, ENTER.
+
+```bash
+./market
+```
+
+On Windows: `.\market.exe`. The same works from Code::Blocks or a double-click.
+
+- [ ] **Or give them on the command line.** Both are optional:
 
 ```bash
 ./market data.csv                 # starts at the time set inside main.cpp (default 14:00:00)
@@ -340,7 +348,7 @@ Everything is a constant at the top of a file. Change it, then rebuild (Step 3).
 | Watch **smaller** orders (more noise) | Lower `MIN_DEPTH_SHARE` (0.02) | `spoof_detector.h` |
 | Data has **no source/participant column** | Lower `ALERT_THRESHOLD` to 30 to 35 (two signals are off) | `spoof_detector.h` |
 | Use a different **instrument** | Set `TICK_SIZE` to its tick (NQ = 0.25) | `spoof_detector.h` |
-| Start at a different **time** | Pass it as the 2nd argument, or edit `SKIP_TO_TIME` | `main.cpp` |
+| Start at a different **time** | Type it when asked, pass it as the 2nd argument, or edit `SKIP_TO_TIME` (the default) | `main.cpp` |
 | Play **faster or slower** | `PLAYBACK_SPEED` (2.0 = twice as fast) | `main.cpp` |
 | Stop long quiet gaps from freezing playback | Lower `MAX_GAP_NS` | `main.cpp` |
 | Change the book-ready check | `MIN_DEPTH_LEVELS`, `MAX_WARMUP_SPREAD` | `main.cpp` |
@@ -411,7 +419,9 @@ If you built with Code::Blocks, the program is in a `bin\Debug` or `bin\Release`
 <details>
 <summary><b>"Cannot open: D:\..."</b></summary>
 
-You ran it without a file path, so it tried the path written inside `main.cpp` (`FALLBACK_PATH`). Always pass your own file: `.\market.exe "data.csv"`.
+The path is wrong or the file is not there. The message shows what the program tried, inside `[ ]`, and then asks again: type the correct path or drag the file into the window. If a launcher glued the path and the time together, or split a path with spaces into pieces, the program repairs that by itself.
+
+Make sure the CSV is where you say it is. A path with spaces is fine, typed or dragged in.
 </details>
 
 <details>
@@ -507,7 +517,8 @@ Make the terminal window at least 35 rows tall, then restart the program.
 1. Open `L3 Visualizer.cbp`.
 2. Make sure **only `main.cpp`** is built. Right-click `L3_orderflow.cpp`, choose **Properties**, and untick all build targets.
 3. Press **Ctrl+F9** to build. The program ends up in a `bin` folder inside the project.
-4. Run it from a terminal with your CSV path (Step 4), because Code::Blocks's run window may not draw colours.
+4. Press **Ctrl+F11** to build and run. Leave **Project → Set programs' arguments** empty. The program asks which CSV file and which start time, so the same project works for any CSV.
+5. If the run window does not draw colours, run it from a terminal instead (Step 4).
 </details>
 
 <details>
