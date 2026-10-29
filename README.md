@@ -242,9 +242,11 @@ An order must pass all three gates:
 
 | Gate | Rule | Default |
 |---|---|---|
-| **1. Not tiny** | Size at least `LARGE_ORDER_THRESHOLD` | 2 |
+| **1. Not tiny** | Size at least `LARGE_ORDER_THRESHOLD` (a sanity floor only) | 10 |
 | **2. Close to the market** (filter #2) | No more than `MAX_WATCH_DISTANCE_TICKS` behind the best price on its side | 20 ticks |
-| **3. Big for the book or for the trader** (filter #4) | At least `MIN_DEPTH_SHARE` of the visible depth on its side **or** at least `MIN_SIZE_RATIO` times that source's usual order size | 10% or 4x |
+| **3. Big for the book** (filter #4) | At least `MIN_DEPTH_SHARE` of the **recent average** visible depth on its side. The average is smoothed over `AVG_DEPTH_WINDOW_S`, so it adapts to the instrument and the time of day, and a sudden thin moment does not make ordinary orders look big. | 3% of a 300 s average |
+
+Optional: set `MIN_SIZE_RATIO` above 0 to also watch orders that are that many times their source's own median size. It is **off** by default, because it flags a fixed slice of every trader's orders and caused most of the false alerts in testing.
 
 ### The eight questions (max 100 points)
 
@@ -266,7 +268,7 @@ Opposite-side execution and Repeat only work on **Path A** (see above).
 ```
   +------ SPOOF ALERTS (1 total) ------+
   | 13:29:41 BID  src=FirmA px=24999.50 sz=40 life=100ms score=61
-  |   [size=40 71.4%depth x40.0med +15] [0fills +15] [life=100ms +6] [opp-side fills=3 +18] [dist=2.0tks +7]
+  |   [size=40 71.4%avgdepth x40.0med +15] [0fills +15] [life=100ms +6] [opp-side fills=3 +18] [dist=2.0tks +7]
   +----------------------------------------------+
 ```
 
@@ -275,7 +277,7 @@ Line 2: **why**, one tag per signal with the points it added.
 
 | Tag | Means |
 |---|---|
-| `size=40 71.4%depth x40.0med` | 40 lots, 71.4% of visible depth, 40 times this source's median order |
+| `size=40 71.4%avgdepth x40.0med` | 40 lots, 71.4% of the recent average visible depth, 40 times this source's median order |
 | `0fills` or `<25%filled` | Cancelled with no (or little) fill |
 | `life=100ms` | How long it lived |
 | `impact=2.0tks` | Mid moved 2 ticks in the spoofer's favour |
@@ -334,7 +336,9 @@ Everything is a constant at the top of a file. Change it, then rebuild (Step 3).
 |---|---|---|
 | See **fewer** alerts | Raise `ALERT_THRESHOLD` (try 55 to 60) | `spoof_detector.h` |
 | See **more** alerts | Lower `ALERT_THRESHOLD` | `spoof_detector.h` |
-| Watch only **bigger** orders | Raise `LARGE_ORDER_THRESHOLD` | `spoof_detector.h` |
+| Watch only **bigger** orders (less noise) | Raise `MIN_DEPTH_SHARE` (0.03 to 0.05) | `spoof_detector.h` |
+| Watch **smaller** orders (more noise) | Lower `MIN_DEPTH_SHARE` (0.02) | `spoof_detector.h` |
+| Data has **no source/participant column** | Lower `ALERT_THRESHOLD` to 30 to 35 (two signals are off) | `spoof_detector.h` |
 | Use a different **instrument** | Set `TICK_SIZE` to its tick (NQ = 0.25) | `spoof_detector.h` |
 | Start at a different **time** | Pass it as the 2nd argument, or edit `SKIP_TO_TIME` | `main.cpp` |
 | Play **faster or slower** | `PLAYBACK_SPEED` (2.0 = twice as fast) | `main.cpp` |
@@ -349,10 +353,11 @@ Everything is a constant at the top of a file. Change it, then rebuild (Step 3).
 |---|---|---|
 | `TICK_SIZE` | 0.25 | Smallest price step of the instrument |
 | `ALERT_THRESHOLD` | 40 | Minimum score to show an alert |
-| `LARGE_ORDER_THRESHOLD` | 2 | Smallest order size ever watched |
+| `LARGE_ORDER_THRESHOLD` | 10 | Sanity floor: smallest order size ever watched |
 | `DEPTH_LEVELS` | 10 | Price levels used to measure visible depth |
-| `MIN_DEPTH_SHARE` | 0.10 | Watch if size is at least this share of side depth |
-| `MIN_SIZE_RATIO` | 4.0 | ...or at least this many times the source's median size |
+| `MIN_DEPTH_SHARE` | 0.03 | Watch if size is at least this share of the recent average side depth |
+| `AVG_DEPTH_WINDOW_S` | 300 | Smoothing time (feed seconds) of that average depth. 60 to 300 behaved the same in tests |
+| `MIN_SIZE_RATIO` | 0 (off) | Optional: ...or at least this many times the source's median size |
 | `SIZE_HISTORY` / `MIN_SIZE_HISTORY` | 50 / 8 | How many past orders feed that median / how many are needed |
 | `MAX_WATCH_DISTANCE_TICKS` | 20 | Ignore orders further behind the best price than this |
 | `MIN_LIFETIME_NS` | 500 ms | Limit for the "fast cancel" signal |
@@ -372,7 +377,7 @@ Do this once per dataset. It takes about ten minutes.
 
 1. **Check your file** with the PowerShell snippet in [Your Data](#your-data-the-csv-file). Note the number of distinct sources.
 2. **Set `TICK_SIZE`** for your instrument.
-3. **Set `LARGE_ORDER_THRESHOLD`.** Find how big the orders are, then start near the 99th percentile of `Add` sizes:
+3. **Check the size floor.** `MIN_DEPTH_SHARE` (3% of the recent average depth) adapts to your market by itself, so you normally leave it alone. `LARGE_ORDER_THRESHOLD` (10) is only a floor. Look at how big your orders are, and change the floor only if 10 is far above or far below a normal order:
 
    ```powershell
    $f = "data.csv"
@@ -381,8 +386,8 @@ Do this once per dataset. It takes about ten minutes.
    $sizes = $rows | Where-Object { $_.action -eq "Add" } | ForEach-Object { [double]$_.size } | Sort-Object
    foreach ($p in 50,90,99,99.9) { "{0}th percentile size: {1}" -f $p, $sizes[[math]::Min($sizes.Count-1,[int]($sizes.Count*$p/100))] }
    ```
-4. **Run once with `ALERT_THRESHOLD = 30`** to see what scores real flagged orders get.
-5. **Raise the threshold** until you only get a handful of alerts per session that you would genuinely want to review.
+4. **Run once with `ALERT_THRESHOLD = 30`** to see what scores real flagged orders get. If your file has **no usable `source` column**, 30 to 35 is the normal setting, not just a test.
+5. **Raise `MIN_DEPTH_SHARE` (0.05) or the threshold** until you only get a handful of alerts per session that you would genuinely want to review. Lowering `MIN_DEPTH_SHARE` to 0.02 catches smaller spoof orders but adds noise; 0.01 was far too noisy in tests.
 6. **Check the top alerts by hand.** Find the time in the CSV and read the order flow around it. Does it really look like a spoof?
 
 ---
@@ -438,7 +443,7 @@ Check your CSV spelling. Actions must be written like `Add` or `add`, and side m
 
 That can simply mean there was no spoofing. If you want to be sure the detector is looking:
 
-- Is `LARGE_ORDER_THRESHOLD` higher than almost every order in your file? Lower it.
+- Is `LARGE_ORDER_THRESHOLD` higher than almost every order in your file, or `MIN_DEPTH_SHARE` too high? Lower it.
 - Is your data very quiet (volume 0, tiny orders)? Try a busier time window.
 - Try `ALERT_THRESHOLD = 30` once.
 - Look for the NOTE at the end about the `source` column. Without identity, the two strongest signals are off.
@@ -447,7 +452,7 @@ That can simply mean there was no spoofing. If you want to be sure the detector 
 <details>
 <summary><b>Far too many alerts</b></summary>
 
-Raise `ALERT_THRESHOLD` and `LARGE_ORDER_THRESHOLD`. Fast-cancelling market makers can look like spoofers on their own. See [Limits](#limits-read-this).
+Raise `MIN_DEPTH_SHARE` (try 0.05) and `ALERT_THRESHOLD`. Fast-cancelling market makers can look like spoofers on their own. See [Limits](#limits-read-this).
 </details>
 
 <details>
@@ -476,7 +481,9 @@ Make the terminal window at least 35 rows tall, then restart the program.
 - **CSV replay only.** There is no live feed yet.
 - **Order IDs are used as they are.** Duplicate or scientific-notation IDs will confuse the book.
 - **The fast-forward part is not scanned.** Orders added before the jump are not watched.
-- **Modify events are not scored**, so "shrink instead of cancel" tricks are missed.
+- **Modify events are not scored**, so "shrink instead of cancel" tricks are missed. An alert also shows the order's price **when it was added**, and its price impact is measured from that moment, so an order that was moved with Modify shows a stale price.
+- **The average-depth yardstick needs a minute or two to warm up.** Start the detector on a fully built book (the fast-forward does this). If a file's opening snapshot is still loading when the detector starts, early orders can look large against a half-built book.
+- **Smaller spoof orders can slip under the 3% gate.** Orders that are only 2% to 3% of the average depth are not watched unless you lower `MIN_DEPTH_SHARE`.
 - **One instrument, one tick size.** `TICK_SIZE` is a single constant.
 - **Alerts arrive about 1 second (of feed time) after the cancel**, because the detector waits for late fills.
 - **Terminal needs ANSI support** and at least 35 rows.
@@ -511,7 +518,8 @@ Make the terminal window at least 35 rows tall, then restart the program.
 **Changes to existing behaviour:**
 - The **price-impact signal was backwards** (it rewarded price moving *toward* the order). It now rewards price moving in the spoofer's favour.
 - The score budget was rebalanced to make room (still 100 maximum).
-- `LARGE_ORDER_THRESHOLD` is now only a minimum size. Orders must also be large for the book or for their source.
+- `LARGE_ORDER_THRESHOLD` is now only a minimum size (a sanity floor).
+- **v2.1:** the size gate is now "at least 3% of the recent average visible depth" (`MIN_DEPTH_SHARE`, `AVG_DEPTH_WINDOW_S`), so there is no instrument-specific contract count to tune. The old "or 4 times the source's median" branch is off by default (`MIN_SIZE_RATIO = 0`).
 - Alerts now show the time and the source.
 - Fully filled orders are now released from the watch list.
 - The repeat signal now counts only earlier zero-fill cancels within 60 seconds.
