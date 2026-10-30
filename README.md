@@ -585,3 +585,5 @@ MIT License. Free to use, modify and distribute with attribution.
 ## Author
 
 Built as an independent research project into market microstructure and L3 order flow analysis. The order book engine, visualizer and detection logic are written from scratch in C++17.
+
+all rights reserves to anand (builder of this repo)
