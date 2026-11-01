@@ -2,6 +2,8 @@
 
 A terminal program written in **C++17** that replays raw **Level 3 (L3)** market data, draws a live **Depth of Market (DOM)** screen, and scores every large order for **spoofing** behaviour while it runs.
 
+NOTE : CONVERT PARQUET FILE INTO CSV then move forward
+
 > Built as a learning project in market microstructure: how order books work, and how surveillance systems spot manipulation.
 
 **Jump to:**
